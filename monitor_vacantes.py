@@ -10,6 +10,7 @@ Qué hace:
   3. Filtra por los departamentos y áreas que te interesan.
   4. Compara con lo visto en ejecuciones anteriores (estado en disco).
   5. Si hay vacantes NUEVAS, te avisa por correo y/o Telegram.
+  6. CADA HORA envía un resumen (encontró o no encontró).
 
 Pensado para correr solo, en bucle (tu PC/servidor) o por agenda
 (GitHub Actions / cron). No guarda contraseñas en el código: todo
@@ -53,6 +54,9 @@ REQUIRE_AREA_MATCH = True
 
 # Archivo donde se recuerda lo ya notificado (para no repetir avisos).
 STATE_FILE = os.environ.get("STATE_FILE", "estado_vacantes.json")
+
+# Archivo donde se guarda la última notificación horaria.
+LAST_HOURLY_REPORT_FILE = os.environ.get("LAST_HOURLY_REPORT_FILE", "ultimo_reporte_horario.json")
 
 # Segundos de espera para que cargue la tabla (sitio JSF/PrimeFaces).
 PAGE_TIMEOUT_MS = 45000
@@ -103,6 +107,39 @@ def guardar_estado(vistas: set) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump({"actualizado": dt.datetime.now().isoformat(),
                    "vistas": sorted(vistas)}, f, ensure_ascii=False, indent=2)
+
+
+# =====================================================================
+# REPORTE HORARIO (para saber cada hora si hay o no vacantes)
+# =====================================================================
+def cargar_ultimo_reporte_horario() -> dict:
+    try:
+        with open(LAST_HOURLY_REPORT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"ultima_hora": None}
+
+
+def guardar_ultimo_reporte_horario(timestamp: str) -> None:
+    with open(LAST_HOURLY_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"ultima_hora": timestamp}, f, ensure_ascii=False, indent=2)
+
+
+def necesita_reporte_horario() -> bool:
+    """Devuelve True si han pasado más de 1 hora desde el último reporte."""
+    reporte = cargar_ultimo_reporte_horario()
+    ultima_hora = reporte.get("ultima_hora")
+    
+    if not ultima_hora:
+        return True
+    
+    try:
+        ultima = dt.datetime.fromisoformat(ultima_hora)
+        ahora = dt.datetime.now()
+        diferencia = (ahora - ultima).total_seconds() / 3600  # en horas
+        return diferencia >= 1.0
+    except Exception:
+        return True
 
 
 # =====================================================================
@@ -199,6 +236,23 @@ def notificar(nuevas: list) -> None:
     enviar_telegram(cuerpo[:3900])  # Telegram limita el tamaño del mensaje.
 
 
+def enviar_reporte_horario(encontradas: int, nuevas: int) -> None:
+    """Envía un reporte cada hora indicando si se encontraron vacantes o no."""
+    fecha = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    if encontradas > 0:
+        estado = f"✅ Se encontraron {encontradas} vacante(s) que coinciden"
+        if nuevas > 0:
+            estado += f" ({nuevas} nueva(s))"
+    else:
+        estado = "❌ No se encontraron vacantes que coincidan"
+    
+    mensaje = f"[Reporte Horario] {fecha}\n{estado}"
+    print(f"\n[reporte_horario] {mensaje}\n")
+    enviar_telegram(mensaje)
+    guardar_ultimo_reporte_horario(dt.datetime.now().isoformat())
+
+
 # =====================================================================
 # CICLO PRINCIPAL
 # =====================================================================
@@ -221,6 +275,11 @@ def revisar_una_vez() -> int:
     else:
         print(f"[{dt.datetime.now():%H:%M}] Sin vacantes nuevas que coincidan "
               f"({len(interesantes)} coinciden, ya notificadas).")
+    
+    # Enviar reporte horario si ha pasado 1 hora
+    if necesita_reporte_horario():
+        enviar_reporte_horario(len(interesantes), len(nuevas))
+    
     return len(nuevas)
 
 
